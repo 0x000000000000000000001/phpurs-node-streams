@@ -1,16 +1,12 @@
 <?php
 
-$exports['writeStringImpl'] = function($stream) {
-    return function($enc) {
-        return function($str) {
-            return function($cb) {
-                return function() use ($str, $cb) {
-                    echo $str;
-                    $cb(null);
-                };
-            };
-        };
-    };
+$exports['writeStringImpl'] = function($stream, $str, $enc) {
+    if (method_exists($stream, 'writeString')) {
+        $stream->writeString($str);
+    } else {
+        echo $str;
+    }
+    return true;
 };
 
 return $exports;
