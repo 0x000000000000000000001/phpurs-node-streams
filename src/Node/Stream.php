@@ -9,4 +9,23 @@ $exports['writeStringImpl'] = function($stream, $str, $enc) {
     return true;
 };
 
+$exports['endImpl'] = function($stream) {
+    if (method_exists($stream, 'end')) {
+        $stream->end();
+    } elseif (isset($stream->end)) {
+        $f = $stream->end;
+        $f();
+    }
+};
+
+$exports['endCbImpl'] = function($stream, $cb) {
+    if (method_exists($stream, 'end')) {
+        $stream->end();
+    } elseif (isset($stream->end)) {
+        $f = $stream->end;
+        $f();
+    }
+    $cb();
+};
+
 return $exports;
