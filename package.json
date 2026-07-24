@@ -1,7 +1,7 @@
 {
   "private": true,
   "devDependencies": {
-    "purescript": "^0.15.15",
+    "purescript": "github:0x000000000000000000001/purescript-npm",
     "spago": "^0.93.42"
   }
 }
