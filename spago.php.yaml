@@ -36,7 +36,7 @@ package:
       - partial
       - spec
 
-workspace: {}
+
 
 workspace:
   packageSet:
