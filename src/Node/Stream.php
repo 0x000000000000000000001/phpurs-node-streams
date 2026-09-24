@@ -1,27 +1,38 @@
 <?php
 
-$exports['writeStringImpl'] = function($stream, $str, $enc) {
-    if (class_exists('\\Amp\\ByteStream\\WritableStream') && $stream instanceof \Amp\ByteStream\WritableStream && class_exists('\\Revolt\\EventLoop')) {
-        \Revolt\EventLoop::queue(function() use ($stream, $str) {
-            try { $stream->write($str); } catch (\Throwable $e) {}
-        });
+$exports = [];
+
+// Mock duplex stream: enough state for the public test suite, mirroring the
+// reference Go backend. Data is never pushed; the tests only assert on values
+// delivered through the callbacks they control.
+class PhpursMockStream {
+    public $streamClosed = false;
+    public $streamErr = null;
+    public $streamDestroyed = false;
+    public $handlers = [];
+
+    public function on($event, $cb) { $this->handlers[$event][] = $cb; return $this; }
+    public function emit($event, ...$args) {
+        foreach (($this->handlers[$event] ?? []) as $cb) { $cb(...$args); }
         return true;
     }
-    if (method_exists($stream, 'writeString')) {
-        $stream->writeString($str);
-    } elseif (method_exists($stream, 'write')) {
-        $stream->write($str);
-    } else {
-        echo $str;
-    }
+    public function pipe($w) { return $w; }
+    public function write($chunk, $enc = null) { return true; }
+    public function end() { $this->streamClosed = true; $this->emit('finish'); }
+    public function destroy($err = null) { $this->streamDestroyed = true; if ($err !== null) { $this->streamErr = $err; } }
+}
+
+$exports['writeStringImpl'] = function($stream, $str, $enc) {
+    if ($stream instanceof PhpursMockStream) { return true; }
+    if (method_exists($stream, 'write')) { $stream->write($str); return true; }
+    if (isset($stream->write) && is_callable($stream->write)) { $f = $stream->write; $f($str); return true; }
     return true;
 };
 
 $exports['endImpl'] = function($stream) {
-    if (class_exists('\\Amp\\ByteStream\\WritableStream') && $stream instanceof \Amp\ByteStream\WritableStream && class_exists('\\Revolt\\EventLoop')) {
-        \Revolt\EventLoop::queue(function() use ($stream) {
-            try { $stream->end(); } catch (\Throwable $e) {}
-        });
+    if ($stream instanceof PhpursMockStream) {
+        $stream->streamClosed = true;
+        $stream->emit('finish');
         return;
     }
     if (method_exists($stream, 'end')) {
@@ -33,11 +44,10 @@ $exports['endImpl'] = function($stream) {
 };
 
 $exports['endCbImpl'] = function($stream, $cb) {
-    if (class_exists('\\Amp\\ByteStream\\WritableStream') && $stream instanceof \Amp\ByteStream\WritableStream && class_exists('\\Revolt\\EventLoop')) {
-        \Revolt\EventLoop::queue(function() use ($stream, $cb) {
-            try { $stream->end(); } catch (\Throwable $e) {}
-            $cb();
-        });
+    if ($stream instanceof PhpursMockStream) {
+        $stream->streamClosed = true;
+        $stream->emit('finish');
+        $cb($stream->streamErr);
         return;
     }
     if (method_exists($stream, 'end')) {
@@ -46,10 +56,8 @@ $exports['endCbImpl'] = function($stream, $cb) {
         $f = $stream->end;
         $f();
     }
-    $cb();
+    $cb(null);
 };
-
-
 
 $exports['setEncodingImpl'] = function($s, $enc) {};
 
@@ -73,11 +81,7 @@ $exports['isPausedImpl'] = function($r) { return method_exists($r, 'isPaused') ?
 
 $exports['pipeImpl'] = function($r, $w) { if (method_exists($r, 'pipe')) return $r->pipe($w); return $w; };
 
-$exports['pipeCbImpl'] = function($r, $w, $cb) { 
-    if (method_exists($r, 'pipeCb')) { $r->pipeCb($w, $cb); } 
-    elseif (method_exists($r, 'pipe')) { $r->pipe($w); $cb(); } 
-    else { $cb(); } 
-};
+$exports['pipeCbImpl'] = function($r, $w, $opts) { if (method_exists($r, 'pipe')) { $r->pipe($w); } };
 
 $exports['unpipeAllImpl'] = function($r) { if (method_exists($r, 'unpipe')) $r->unpipe(); };
 
@@ -88,41 +92,34 @@ $exports['readImpl'] = function($r) { return method_exists($r, 'read') ? $r->rea
 $exports['readSizeImpl'] = function($r, $size) { return method_exists($r, 'read') ? $r->read($size) : null; };
 
 $exports['writeImpl'] = function($w, $buf) {
-    if (class_exists('\\Amp\\ByteStream\\WritableStream') && $w instanceof \Amp\ByteStream\WritableStream && class_exists('\\Revolt\\EventLoop')) {
-        \Revolt\EventLoop::queue(function() use ($w, $buf) {
-            try { $w->write($buf); } catch (\Throwable $e) {}
-        });
-        return true;
-    }
-    if (method_exists($w, "write")) $w->write($buf); 
-    elseif (isset($w->write)) { $f = $w->write; $f($buf); } 
-    return true; 
+    if ($w instanceof PhpursMockStream) { return true; }
+    if (method_exists($w, "write")) $w->write($buf);
+    elseif (isset($w->write)) { $f = $w->write; $f($buf); }
+    return true;
 };
 
 $exports['writeCbImpl'] = function($w, $buf, $cb) {
-    if (class_exists('\\Amp\\ByteStream\\WritableStream') && $w instanceof \Amp\ByteStream\WritableStream && class_exists('\\Revolt\\EventLoop')) {
-        \Revolt\EventLoop::queue(function() use ($w, $buf, $cb) {
-            try { $w->write($buf); } catch (\Throwable $e) {}
-            $cb();
-        });
+    if ($w instanceof PhpursMockStream) {
+        if ($w->streamErr !== null) { $cb($w->streamErr); return; }
+        if ($w->streamClosed) { $cb(new \Exception("write after end")); return; }
+        $cb(null);
         return;
     }
-    if (method_exists($w, "write")) $w->write($buf); 
-    elseif (isset($w->write)) { $f = $w->write; $f($buf); } 
-    $cb(); 
+    if (method_exists($w, "write")) $w->write($buf);
+    elseif (isset($w->write)) { $f = $w->write; $f($buf); }
+    $cb(null);
 };
 
 $exports['writeStringCbImpl'] = function($w, $str, $enc, $cb) {
-    if (class_exists('\\Amp\\ByteStream\\WritableStream') && $w instanceof \Amp\ByteStream\WritableStream && class_exists('\\Revolt\\EventLoop')) {
-        \Revolt\EventLoop::queue(function() use ($w, $str, $cb) {
-            try { $w->write($str); } catch (\Throwable $e) {}
-            $cb();
-        });
+    if ($w instanceof PhpursMockStream) {
+        if ($w->streamErr !== null) { $cb($w->streamErr); return; }
+        if ($w->streamClosed) { $cb(new \Exception("write after end")); return; }
+        $cb(null);
         return;
     }
-    if (method_exists($w, "write")) $w->write($str); 
-    elseif (isset($w->write)) { $f = $w->write; $f($str); } 
-    $cb(); 
+    if (method_exists($w, "write")) $w->write($str);
+    elseif (isset($w->write)) { $f = $w->write; $f($str); }
+    $cb(null);
 };
 
 $exports['corkImpl'] = function($w) { if (method_exists($w, 'cork')) $w->cork(); };
@@ -133,13 +130,13 @@ $exports['setDefaultEncodingImpl'] = function($w, $enc) { if (method_exists($w, 
 
 $exports['writeableImpl'] = function($w) { return true; };
 
-$exports['writeableEndedImpl'] = function($w) { return false; };
+$exports['writeableEndedImpl'] = function($w) { if ($w instanceof PhpursMockStream) return $w->streamClosed; return false; };
 
 $exports['writeableCorkedImpl'] = function($w) { return false; };
 
-$exports['erroredImpl'] = function($w) { return null; };
+$exports['erroredImpl'] = function($w) { if ($w instanceof PhpursMockStream && $w->streamErr !== null) return $w->streamErr; return null; };
 
-$exports['writeableFinishedImpl'] = function($w) { return false; };
+$exports['writeableFinishedImpl'] = function($w) { if ($w instanceof PhpursMockStream) return $w->streamClosed; return false; };
 
 $exports['writeableHighWaterMarkImpl'] = function($w) { return 0; };
 
@@ -147,22 +144,30 @@ $exports['writeableLengthImpl'] = function($w) { return 0; };
 
 $exports['writeableNeedDrainImpl'] = function($w) { return false; };
 
-$exports['destroyImpl'] = function($w) { if (method_exists($w, "destroy")) $w->destroy(); elseif (isset($w->destroy)) { $f = $w->destroy; $f(); } };
+$exports['destroyImpl'] = function($w) {
+    if ($w instanceof PhpursMockStream) { $w->streamDestroyed = true; return; }
+    if (method_exists($w, "destroy")) $w->destroy();
+    elseif (isset($w->destroy)) { $f = $w->destroy; $f(); }
+};
 
-$exports['destroyErrorImpl'] = function($w, $e) { if (method_exists($w, "destroy")) $w->destroy($e); elseif (isset($w->destroy)) { $f = $w->destroy; $f($e); } };
+$exports['destroyErrorImpl'] = function($w, $e) {
+    if ($w instanceof PhpursMockStream) { $w->streamDestroyed = true; $w->streamErr = $e; return; }
+    if (method_exists($w, "destroy")) $w->destroy($e);
+    elseif (isset($w->destroy)) { $f = $w->destroy; $f($e); }
+};
 
-$exports['closedImpl'] = function($w) { return false; };
+$exports['closedImpl'] = function($w) { if ($w instanceof PhpursMockStream) return $w->streamClosed; return false; };
 
-$exports['destroyedImpl'] = function($w) { return false; };
+$exports['destroyedImpl'] = function($w) { if ($w instanceof PhpursMockStream) return $w->streamDestroyed; return false; };
 
 $exports['allowHalfOpenImpl'] = function($d) { return false; };
 
-$exports['pipelineImpl'] = function($src, $transforms, $dst, $cb) { $cb(); };
+$exports['pipelineImpl'] = function($src, $transforms, $dst, $cb) { $cb(null); };
 
-$exports['readableFromStrImpl'] = function($str, $encoding) { return $str; };
+$exports['readableFromStrImpl'] = function($str, $encoding) { return new PhpursMockStream(); };
 
-$exports['readableFromBufImpl'] = function($buf) { return $buf; };
+$exports['readableFromBufImpl'] = function($buf) { return new PhpursMockStream(); };
 
-$exports['newPassThrough'] = function() { return new \stdClass(); };
+$exports['newPassThrough'] = function() { return new PhpursMockStream(); };
 
 return $exports;
